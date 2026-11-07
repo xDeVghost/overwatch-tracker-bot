@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  owbot:
+    build: .
+    container_name: overwatch-tracker-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+      - ./cache:/app/cache
