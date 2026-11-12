@@ -13,8 +13,8 @@ DEFAULT_PLATFORM = os.getenv("DEFAULT_PLATFORM", "pc")
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "ru")
 
 # Тайминги опроса и сессий (секунды)
-POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "300"))       # 5 минут опрос
-SESSION_TIMEOUT_SEC = int(os.getenv("SESSION_TIMEOUT_SEC", "900"))   # 15 минут тишины для авто-закрытия сессии
+POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "60"))       # 60 секунд (1 минута) опрос
+SESSION_TIMEOUT_SEC = int(os.getenv("SESSION_TIMEOUT_SEC", "600"))   # 10 минут тишины для авто-закрытия сессии
 MIN_SESSION_SEC = int(os.getenv("MIN_SESSION_SEC", "300"))           # минимум 5 минут игры (или >= 1 матча)
 # GAP_FACTOR — зарезервировано для будущей логики пропуска пауз (пока не используется)
 # GAP_FACTOR = int(os.getenv("GAP_FACTOR", "3"))

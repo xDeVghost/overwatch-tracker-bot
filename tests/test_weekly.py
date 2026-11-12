@@ -94,3 +94,32 @@ def test_session_archiving_and_weekly_aggregation():
     except PermissionError:
         pass
 
+
+def test_db_last_weekly_sent_tracking():
+    tmp_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp_db = tmp_file.name
+    tmp_file.close()
+
+    db = Database(tmp_db)
+    user_id = 12345
+    db.upsert_user(user_id, "Tracker-123")
+
+    # По умолчанию пустая строка
+    assert db.get_user_last_weekly(user_id) == ""
+
+    # Устанавливаем ключ недели
+    db.set_user_last_weekly(user_id, "2026-11-09")
+    assert db.get_user_last_weekly(user_id) == "2026-11-09"
+
+    # Обновляем на следующую неделю
+    db.set_user_last_weekly(user_id, "2026-11-16")
+    assert db.get_user_last_weekly(user_id) == "2026-11-16"
+
+    import gc
+    del db
+    gc.collect()
+    try:
+        os.remove(tmp_db)
+    except PermissionError:
+        pass
+

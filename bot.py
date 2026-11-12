@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta
 import json
 import logging
 import os
@@ -53,13 +54,14 @@ from models import (
 )
 from provider import OverFastProvider
 from renderer import render_session_card
-from weekly_engine import aggregate_weekly_report
+from weekly_engine import aggregate_weekly_report, get_current_week_bounds
 from weekly_renderer import fmt_time, render_weekly_card
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 
-bot = Bot(token=config.BOT_TOKEN)
+_bot_token = config.BOT_TOKEN if (config.BOT_TOKEN and ":" in config.BOT_TOKEN) else "123456789:AAG_dummy_test_token_for_import"
+bot = Bot(token=_bot_token)
 dp = Dispatcher()
 db = Database(config.DB_PATH)
 provider = OverFastProvider(config.OVERFAST_BASE_URL)
@@ -142,8 +144,14 @@ async def poll_single_user(session: aiohttp.ClientSession, user_row: Tuple[int, 
     roles_map, _ = db.get_heroes_maps()
     now_ts = int(time.time())
 
-    for mode in ("quickplay", "competitive"):
-        curr_snap, cache_age = await provider.fetch_career(session, btag, mode, platform)
+    # Запрашиваем quickplay и competitive параллельно для ускорения опроса API
+    (snap_qp, age_qp), (snap_comp, age_comp) = await asyncio.gather(
+        provider.fetch_career(session, btag, "quickplay", platform),
+        provider.fetch_career(session, btag, "competitive", platform),
+    )
+    mode_careers = [("quickplay", snap_qp, age_qp), ("competitive", snap_comp, age_comp)]
+
+    for mode, curr_snap, cache_age in mode_careers:
         max_cache_age = max(max_cache_age, cache_age)
         if not curr_snap:
             continue
@@ -512,7 +520,7 @@ async def cb_set_hero(call: CallbackQuery):
 
 
 
-@dp.message(Command(\"close\"))
+@dp.message(Command("close"))
 async def cmd_close_manual(message: Message):
     user = db.get_user(message.chat.id)
     user_lang = db.get_user_language(message.chat.id)
@@ -532,6 +540,102 @@ async def cmd_close_manual(message: Message):
         await message.answer(t("cmd_close_empty", user_lang), reply_markup=main_reply_kb(user_lang))
 
 
+async def send_weekly_report_to_user(
+    user_id: int, btag: str, avatar_url: str, user_lang: str, target_dt: datetime
+) -> int:
+    """
+    Генерирует и отправляет карточки еженедельного отчёта за неделю, содержащую target_dt.
+    Возвращает количество отправленных карточек (0, 1 или 2).
+    """
+    avatar_path = os.path.join(assets.AVATARS_CACHE_DIR, f"{btag}.png")
+    if not os.path.isfile(avatar_path) and avatar_url:
+        try:
+            async with aiohttp.ClientSession() as sess:
+                await download_avatar_if_needed(sess, btag, avatar_url)
+        except Exception:
+            pass
+
+    target_ts = int(target_dt.timestamp())
+    sent_count = 0
+    for mode in ("quickplay", "competitive"):
+        try:
+            weekly_data = aggregate_weekly_report(user_id, mode, db, now_ts=target_ts, lang=user_lang)
+            if avatar_path and os.path.isfile(avatar_path):
+                weekly_data.player_avatar_path = avatar_path
+
+            # Отправляем карточку для режима только если были матчи
+            if weekly_data.total_matches > 0:
+                png_bytes = render_weekly_card(weekly_data)
+                photo = BufferedInputFile(png_bytes, filename=f"weekly_{mode}.png")
+                caption = t(
+                    "weekly_caption",
+                    user_lang,
+                    player_name=weekly_data.player_name,
+                    mode_title=weekly_data.mode_title,
+                    period=weekly_data.period_title,
+                    matches=weekly_data.total_matches,
+                    wr=weekly_data.winrate_pct,
+                    time=fmt_time(weekly_data.total_time_sec),
+                    sessions=weekly_data.sessions_count,
+                    best_day=weekly_data.best_day_title,
+                    hero_of_week=weekly_data.hero_of_the_week,
+                )
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=main_reply_kb(user_lang),
+                )
+                sent_count += 1
+                logger.info(
+                    f"WEEKLY_REPORT_SENT: user={user_id} btag={btag} mode={mode} matches={weekly_data.total_matches}"
+                )
+        except Exception as e:
+            logger.error(f"WEEKLY_REPORT_ERROR: user={user_id} mode={mode} err={e}", exc_info=True)
+
+    return sent_count
+
+
+async def check_auto_weekly_reports():
+    """
+    Автоматическая отправка еженедельного отчёта всем активным пользователям.
+    Срабатывает:
+    - В воскресенье вечером (с 20:00) за завершающуюся неделю.
+    - В понедельник за только что окончившуюся прошедшую неделю.
+    Пометка в БД гарантирует, что каждому пользователю отчёт за неделю отправляется строго 1 раз.
+    """
+    now_dt = datetime.now()
+    if now_dt.weekday() == 6 and now_dt.hour >= 20:
+        target_dt = now_dt
+    elif now_dt.weekday() == 0:
+        target_dt = now_dt - timedelta(days=1)
+    else:
+        return
+
+    start_dt, _, _ = get_current_week_bounds(target_dt)
+    week_key = start_dt.strftime("%Y-%m-%d")
+
+    for user_row in db.list_users():
+        user_id = user_row[0]
+        btag = user_row[1]
+        avatar_url = user_row[4] if len(user_row) > 4 else ""
+        user_lang = user_row[5] if len(user_row) > 5 else db.get_user_language(user_id)
+
+        last_sent = db.get_user_last_weekly(user_id)
+        if last_sent == week_key:
+            continue
+
+        try:
+            sent_count = await send_weekly_report_to_user(user_id, btag, avatar_url, user_lang, target_dt)
+            if sent_count > 0:
+                logger.info(f"AUTO_WEEKLY_SUCCESS: user={user_id} btag={btag} week={week_key} sent={sent_count}")
+        except Exception as e:
+            logger.error(f"AUTO_WEEKLY_FAIL: user={user_id} err={e}", exc_info=True)
+        finally:
+            db.set_user_last_weekly(user_id, week_key)
+
+
 @dp.message(Command("weekly"))
 @dp.message(F.text.in_([BTN_WEEKLY_RU, BTN_WEEKLY_EN]))
 async def cmd_weekly(message: Message):
@@ -546,45 +650,13 @@ async def cmd_weekly(message: Message):
     btag = user[1]
     avatar_url = user[4] if len(user) > 4 else ""
 
-    avatar_path = os.path.join(assets.AVATARS_CACHE_DIR, f"{btag}.png")
-    if not os.path.isfile(avatar_path) and avatar_url:
-        async with aiohttp.ClientSession() as session:
-            await download_avatar_if_needed(session, btag, avatar_url)
+    sent_count = await send_weekly_report_to_user(user_id, btag, avatar_url, user_lang, datetime.now())
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
-    sent_any = False
-    for mode in ("quickplay", "competitive"):
-        weekly_data = aggregate_weekly_report(user_id, mode, db, lang=user_lang)
-        if avatar_path and os.path.isfile(avatar_path):
-            weekly_data.player_avatar_path = avatar_path
-
-        # Отправляем карточку для режима только если были матчи
-        if weekly_data.total_matches > 0:
-            png_bytes = render_weekly_card(weekly_data)
-            photo = BufferedInputFile(png_bytes, filename=f"weekly_{mode}.png")
-            caption = t(
-                "weekly_caption",
-                user_lang,
-                player_name=weekly_data.player_name,
-                mode_title=weekly_data.mode_title,
-                period=weekly_data.period_title,
-                matches=weekly_data.total_matches,
-                wr=weekly_data.winrate_pct,
-                time=fmt_time(weekly_data.total_time_sec),
-                sessions=weekly_data.sessions_count,
-                best_day=weekly_data.best_day_title,
-                hero_of_week=weekly_data.hero_of_the_week,
-            )
-            await message.answer_photo(
-                photo=photo,
-                caption=caption,
-                parse_mode="HTML",
-                reply_markup=main_reply_kb(user_lang),
-            )
-            sent_any = True
-
-    await status_msg.delete()
-
-    if not sent_any:
+    if sent_count == 0:
         await message.answer(
             t("weekly_empty", user_lang),
             parse_mode="HTML",
@@ -597,6 +669,13 @@ async def polling_worker():
         await asyncio.sleep(config.POLL_INTERVAL_SEC)
         now_ts = int(time.time())
         try:
+            # 1. Проверяем и отправляем автоматические еженедельные отчёты
+            try:
+                await check_auto_weekly_reports()
+            except Exception as w_err:
+                logger.error(f"AUTO_WEEKLY_WORKER_ERROR: {w_err}", exc_info=True)
+
+            # 2. Опрашиваем пользователей и отправляем карточки сессий
             async with aiohttp.ClientSession() as session:
                 await ensure_heroes_catalog(session)
                 for user_row in db.list_users():

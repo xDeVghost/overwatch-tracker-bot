@@ -145,6 +145,7 @@ class Database:
             self._ensure_column(conn, "users", "avatar_url", "TEXT DEFAULT ''")
             self._ensure_column(conn, "users", "ranks_json", "TEXT DEFAULT ''")
             self._ensure_column(conn, "users", "language", "TEXT DEFAULT 'ru'")
+            self._ensure_column(conn, "users", "last_weekly_sent_week", "TEXT DEFAULT ''")
             self._ensure_column(conn, "session_heroes", "eliminations", "REAL NOT NULL DEFAULT 0.0")
             self._ensure_column(conn, "observation_buckets", "eliminations", "REAL NOT NULL DEFAULT 0.0")
             self._ensure_column(conn, "active_sessions", "last_viewed_games", "INTEGER NOT NULL DEFAULT 0")
@@ -252,6 +253,15 @@ class Database:
             return json.loads(row[0])
         except Exception:
             return {}
+
+    def get_user_last_weekly(self, user_id: int) -> str:
+        with self._conn() as conn:
+            row = conn.execute("SELECT last_weekly_sent_week FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        return row[0] if (row and row[0]) else ""
+
+    def set_user_last_weekly(self, user_id: int, week_key: str):
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET last_weekly_sent_week = ? WHERE user_id = ?", (week_key, user_id))
 
     def get_user(self, user_id: int) -> Optional[Tuple[int, str, str, int, str, str]]:
         with self._conn() as conn:

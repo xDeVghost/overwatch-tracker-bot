@@ -251,20 +251,6 @@ def test_session_storage_and_timeout_cleanup():
         pass
 
 
-def test_compute_norm_and_band_empty_and_single():
-    """_compute_norm_and_band must not crash on empty or single-element lists."""
-    # Empty list → all zeros
-    norm, lo, hi = _compute_norm_and_band([])
-    assert norm == 0.0 and lo == 0.0 and hi == 0.0
-
-    # Single value → norm = value, band ±12%
-    v = 5000.0
-    norm2, lo2, hi2 = _compute_norm_and_band([v])
-    assert norm2 == v
-    assert abs(lo2 - v * 0.88) < 1.0
-    assert abs(hi2 - v * 1.12) < 1.0
-
-
 def test_competitive_ranks_parsing_and_db_storage():
     import json
     from engine import extract_competitive_ranks
@@ -308,13 +294,71 @@ def test_competitive_ranks_parsing_and_db_storage():
 
 def test_compute_norm_and_band_empty_and_single():
     """_compute_norm_and_band must not crash on empty or single-element lists."""
-    # Empty list → all zeros
     norm, lo, hi = _compute_norm_and_band([])
     assert norm == 0.0 and lo == 0.0 and hi == 0.0
 
-    # Single value → norm = value, band ±12%
     v = 5000.0
     norm2, lo2, hi2 = _compute_norm_and_band([v])
     assert norm2 == v
     assert abs(lo2 - v * 0.88) < 1.0
     assert abs(hi2 - v * 1.12) < 1.0
+
+
+def test_competitive_session_card_build_and_render_without_crash():
+    """Симуляция сессии из 6 соревновательных игр с unranked рангами и 0 наблюдений."""
+    import json
+    import time
+    import bot
+    from renderer import render_session_card
+
+    tmp_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp_db = tmp_file.name
+    tmp_file.close()
+
+    test_db = Database(tmp_db)
+    user_id = 1014607568
+    btag = "Vavn-21728"
+    test_db.upsert_user(user_id, btag)
+
+    # Записываем null-ранги (unranked)
+    raw_comp = {"pc": {"tank": None, "damage": None, "support": None}}
+    test_db.update_user_ranks(user_id, json.dumps(raw_comp))
+
+    # Добавляем дельты сессии на 6 игр (3 победы, 3 поражения)
+    now_ts = int(time.time())
+    deltas = {
+        "all-heroes": HeroCounters(games_played=6, games_won=3, games_lost=3),
+        "sojourn": HeroCounters(time_played=1200, eliminations=24, deaths=8, hero_damage_done=18000),
+        "sombra": HeroCounters(time_played=600, eliminations=12, deaths=5, hero_damage_done=7000),
+        "sierra": HeroCounters(time_played=400, eliminations=8, deaths=4, hero_damage_done=4500),
+    }
+    test_db.add_session_delta(user_id, "competitive", deltas, now_ts)
+
+    orig_db = bot.db
+    bot.db = test_db
+    try:
+        card, total_sec = bot.build_session_card_for_mode(user_id, btag, "competitive", lang="ru")
+        assert card is not None
+        assert card.games_played == 6
+        assert card.games_won == 3
+        assert card.games_lost == 3
+        assert len(card.role_blocks) > 0
+
+        png_bytes = render_session_card(card)
+        assert len(png_bytes) > 5000
+
+        sess_id = test_db.archive_active_session(user_id, "competitive", now_ts)
+        assert sess_id is not None
+        assert test_db.get_active_session(user_id, "competitive") is None
+    finally:
+        bot.db = orig_db
+        import gc
+        del test_db
+        gc.collect()
+        try:
+            os.remove(tmp_db)
+        except PermissionError:
+            pass
+
+
+
