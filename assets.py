@@ -13,6 +13,7 @@ os.makedirs(AVATARS_CACHE_DIR, exist_ok=True)
 # Ключ героя в API -> базовое имя файла в heroespfp/
 HERO_PFP_SPECIAL_MAP = {
     "dva": "d_va.png",
+    "d-mon": "d_mon.png",
     "jetpack-cat": "jetpack_cat.png",
     "junker-queen": "junker_queen.png",
     "soldier-76": "soldier_76.png",

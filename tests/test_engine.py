@@ -249,6 +249,44 @@ def test_evaluate_hero_session_short_time_provided_as_is():
     assert block.deaths_scale.session_val == round(3 * (600 / 420), 1)
 
 
+def test_evaluate_hero_session_no_prior_history_does_not_compare_to_self():
+    # Ситуация пользователя: в соревновательном режиме это первые игры на герое
+    # career_counters равен session_counters (время вне сессии = 0)
+    sess_cnt = HeroCounters(time_played=1800, deaths=10, eliminations=30, hero_damage_done=25000)
+    same_career_cnt = HeroCounters(time_played=1800, deaths=10, eliminations=30, hero_damage_done=25000)
+
+    # 1. Без альтернативного режима норма не фабрикуется в 0% «как обычно», а честно пишется «норма ещё не накоплена»
+    block_no_alt = evaluate_hero_session(
+        role="damage",
+        hero_key="sojourn",
+        hero_name="Соджорн",
+        is_fallback=False,
+        session_counters=sess_cnt,
+        observations=[],
+        career_counters=same_career_cnt,
+        alt_career_counters=None,
+    )
+    assert block_no_alt.output_scale.show_scale is False
+    assert block_no_alt.output_scale.pct_diff is None
+    assert "норма ещё не накоплена" in block_no_alt.output_scale.label_text
+
+    # 2. При наличии карьеры из quickplay (например, 87 часов на Соджорн) — используется она
+    qp_career = HeroCounters(time_played=300000, deaths=3000, eliminations=8000, hero_damage_done=4000000)
+    block_with_qp = evaluate_hero_session(
+        role="damage",
+        hero_key="sojourn",
+        hero_name="Соджорн",
+        is_fallback=False,
+        session_counters=sess_cnt,
+        observations=[],
+        career_counters=same_career_cnt,
+        alt_career_counters=qp_career,
+    )
+    assert block_with_qp.output_scale.show_scale is True
+    assert block_with_qp.output_scale.norm_val > 0
+    assert block_with_qp.output_scale.pct_diff is not None
+
+
 def test_session_storage_and_timeout_cleanup():
     tmp_file = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp_db = tmp_file.name

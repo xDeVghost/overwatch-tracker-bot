@@ -4,6 +4,7 @@ import os
 from typing import Dict, List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
+import config
 from assets import (
     get_banner_image,
     get_hero_avatar,
@@ -118,7 +119,7 @@ def render_session_card(data: SessionCardData) -> bytes:
 
     text_x = pfp_x + pfp_size + 18
     player_title = data.player_name.upper()
-    date_str = datetime.now().strftime("%d.%m.%Y")
+    date_str = datetime.now(config.APP_TIMEZONE).strftime("%d.%m.%Y")
     games_word = "games" if lang == "en" else "игр"
     min_word = "min" if lang == "en" else "мин"
     sub_str = f"{data.mode_title}  •  {data.games_played} {games_word}  •  {data.duration_min} {min_word}  •  {date_str}"

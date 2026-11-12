@@ -7,25 +7,7 @@ from models import CareerSnapshot, HeroCounters
 
 logger = logging.getLogger(__name__)
 
-# Русские имена героев для красивого отображения поверх ключей API
-HERO_RU_MAP = {
-    "ana": "Ана", "ashe": "Эш", "baptiste": "Батист", "bastion": "Бастион",
-    "brigitte": "Бригитта", "cassidy": "Кэссиди", "doomfist": "Кулак Смерти",
-    "dva": "D.Va", "echo": "Эхо", "freja": "Фрейя", "genji": "Гэндзи",
-    "hanzo": "Хандзо", "hazard": "Хазард", "illari": "Иллари",
-    "jetpack-cat": "Реактивная Киса", "junker-queen": "Королева Стервятников",
-    "junkrat": "Крысавчик", "juno": "Юнона", "kiriko": "Кирико",
-    "lifeweaver": "Ткач Жизни", "lucio": "Лусио", "mauga": "Мауга",
-    "mei": "Мэй", "mercy": "Ангел", "moira": "Мойра", "orisa": "Ориса",
-    "pharah": "Фарра", "ramattra": "Раматтра", "reaper": "Жнец",
-    "reinhardt": "Райнхардт", "roadhog": "Турбосвин", "sigma": "Сигма",
-    "sierra": "Сьерра", "sojourn": "Соджорн", "soldier-76": "Солдат-76",
-    "sombra": "Сомбра", "symmetra": "Симметра", "torbjorn": "Торбьорн",
-    "tracer": "Трейсер", "venture": "Авантюра", "widowmaker": "Роковая Вдова",
-    "winston": "Уинстон", "wrecking-ball": "Таран", "zarya": "Заря",
-    "zenyatta": "Дзенъятта",
-    "anran": "Анран",
-}
+from i18n import HERO_RU_MAP
 
 NO_CACHE_HEADERS = {
     "Cache-Control": "no-cache, no-store, must-revalidate",

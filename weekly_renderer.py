@@ -275,8 +275,12 @@ def render_weekly_card(data: WeeklyReportData) -> bytes:
             draw.text((hx, row_y + 24), format_time_duration(h_stat.time_sec, lang), font=fonts["small"], fill=COLOR_TEXT_MUTED)
 
             # Счёт
-            score_s = f"{h_stat.games_won}-{h_stat.games_lost}"
-            s_col = COLOR_WIN_GREEN if h_stat.games_won >= h_stat.games_lost else COLOR_LOSS_RED
+            has_score = (h_stat.games_won + h_stat.games_lost) > 0
+            score_s = f"{h_stat.games_won}-{h_stat.games_lost}" if has_score else "—"
+            if has_score:
+                s_col = COLOR_WIN_GREEN if h_stat.games_won >= h_stat.games_lost else COLOR_LOSS_RED
+            else:
+                s_col = COLOR_TEXT_LIGHT
             draw.text((c_score_x, row_y + 12), score_s, font=fonts["bold"], fill=s_col)
 
             # Метрики за 10 мин

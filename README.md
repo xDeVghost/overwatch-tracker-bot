@@ -125,6 +125,7 @@ sudo systemctl enable --now owbot
 | `DB_PATH` | `ow_sessions.db` | Path to SQLite database file |
 | `DEFAULT_PLATFORM` | `pc` | Player platform (`pc` or `console`) |
 | `DEFAULT_LANGUAGE` | `ru` | Default language (`ru` or `en`) |
+| `APP_TIMEZONE` | `Europe/Moscow` | Time zone for weekly boundaries, automatic reports and card dates |
 | `OVERFAST_BASE_URL` | `https://overfast-api.tekrop.fr` | OverFast API base URL |
 | `POLL_INTERVAL_SEC` | `300` | Profile polling interval in seconds (5 min) |
 | `SESSION_TIMEOUT_SEC` | `900` | Inactivity time to automatically close session (15 min) |

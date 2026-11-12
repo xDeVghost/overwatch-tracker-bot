@@ -1,4 +1,6 @@
 import os
+from datetime import timezone
+from zoneinfo import ZoneInfo
 
 try:
     from dotenv import load_dotenv
@@ -11,6 +13,10 @@ DB_PATH = os.getenv("DB_PATH", "ow_sessions.db")
 OVERFAST_BASE_URL = os.getenv("OVERFAST_BASE_URL", "https://overfast-api.tekrop.fr")
 DEFAULT_PLATFORM = os.getenv("DEFAULT_PLATFORM", "pc")
 DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "ru")
+try:
+    APP_TIMEZONE = ZoneInfo(os.getenv("APP_TIMEZONE", "Europe/Moscow"))
+except Exception:
+    APP_TIMEZONE = timezone.utc
 
 # Тайминги опроса и сессий (секунды)
 POLL_INTERVAL_SEC = int(os.getenv("POLL_INTERVAL_SEC", "60"))       # 60 секунд (1 минута) опрос

@@ -8,13 +8,23 @@ from models import BucketState, CareerSnapshot, HeroCounters, ObservationRecord
 from provider import HERO_RU_MAP
 
 DEFAULT_HERO_ROLES = {
+    # Tanks
     "dva": "tank", "doomfist": "tank", "hazard": "tank", "junker-queen": "tank",
     "mauga": "tank", "orisa": "tank", "ramattra": "tank", "reinhardt": "tank",
     "roadhog": "tank", "sigma": "tank", "winston": "tank", "wrecking-ball": "tank", "zarya": "tank",
+    "domina": "tank", "doctrine": "tank", "d-mon": "tank", "d_mon": "tank",
+    # Damage
+    "ashe": "damage", "bastion": "damage", "cassidy": "damage", "echo": "damage",
+    "genji": "damage", "hanzo": "damage", "junkrat": "damage", "mei": "damage",
+    "pharah": "damage", "reaper": "damage", "sojourn": "damage", "soldier-76": "damage",
+    "sombra": "damage", "symmetra": "damage", "torbjorn": "damage", "tracer": "damage",
+    "venture": "damage", "widowmaker": "damage", "freja": "damage", "sierra": "damage",
+    "anran": "damage", "emre": "damage",
+    # Supports
     "ana": "support", "baptiste": "support", "brigitte": "support", "illari": "support",
     "jetpack-cat": "support", "juno": "support", "kiriko": "support", "lifeweaver": "support",
     "lucio": "support", "mercy": "support", "moira": "support", "zenyatta": "support",
-    "freja": "damage", "sierra": "damage", "anran": "damage",
+    "mizuki": "support", "shion": "support", "wuyang": "support",
 }
 
 
@@ -109,6 +119,9 @@ class Database:
                     eliminations REAL NOT NULL DEFAULT 0.0,
                     damage REAL NOT NULL,
                     healing REAL NOT NULL,
+                    games_played INTEGER NOT NULL DEFAULT 0,
+                    games_won INTEGER NOT NULL DEFAULT 0,
+                    games_lost INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (user_id, gamemode, hero_key)
                 );
 
@@ -137,6 +150,9 @@ class Database:
                     deaths REAL NOT NULL DEFAULT 0.0,
                     damage REAL NOT NULL DEFAULT 0.0,
                     healing REAL NOT NULL DEFAULT 0.0,
+                    games_played INTEGER NOT NULL DEFAULT 0,
+                    games_won INTEGER NOT NULL DEFAULT 0,
+                    games_lost INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (session_id, hero_key)
                 );
             """)
@@ -147,6 +163,12 @@ class Database:
             self._ensure_column(conn, "users", "language", "TEXT DEFAULT 'ru'")
             self._ensure_column(conn, "users", "last_weekly_sent_week", "TEXT DEFAULT ''")
             self._ensure_column(conn, "session_heroes", "eliminations", "REAL NOT NULL DEFAULT 0.0")
+            self._ensure_column(conn, "session_heroes", "games_played", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "session_heroes", "games_won", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "session_heroes", "games_lost", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "session_history_heroes", "games_played", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "session_history_heroes", "games_won", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "session_history_heroes", "games_lost", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "observation_buckets", "eliminations", "REAL NOT NULL DEFAULT 0.0")
             self._ensure_column(conn, "active_sessions", "last_viewed_games", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "observations", "eliminations_10m", "REAL NOT NULL DEFAULT 0.0")
@@ -209,6 +231,29 @@ class Database:
     ):
         now = int(time.time())
         with self._conn() as conn:
+            # A Telegram user may re-bind the bot to another BattleTag.  All
+            # snapshots, buckets and sessions belong to the old identity and
+            # must be removed before the new baseline is written; otherwise
+            # the next poll produces a synthetic delta between two accounts.
+            old = conn.execute(
+                "SELECT battletag, platform FROM users WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if old and (old[0] != battletag or old[1] != platform):
+                conn.execute(
+                    "DELETE FROM session_history_heroes WHERE session_id IN "
+                    "(SELECT id FROM session_history WHERE user_id = ?)",
+                    (user_id,),
+                )
+                conn.execute("DELETE FROM session_history WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM session_heroes WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM active_sessions WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM observations WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM observation_buckets WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM career_snapshots WHERE user_id = ?", (user_id,))
+                conn.execute("DELETE FROM user_preferences WHERE user_id = ?", (user_id,))
+                conn.execute("UPDATE users SET last_weekly_sent_week = '' WHERE user_id = ?", (user_id,))
+
             conn.execute(
                 """
                 INSERT INTO users (user_id, battletag, platform, last_summary_updated_at, created_at, avatar_url, language)
@@ -330,6 +375,107 @@ class Database:
                 (user_id, gamemode, json.dumps(payload), snap.taken_at),
             )
 
+    def record_poll_update(
+        self,
+        user_id: int,
+        gamemode: str,
+        deltas: Dict[str, HeroCounters],
+        bucket_updates: Dict[str, BucketState],
+        closed_observations: List[Tuple[str, ObservationRecord]],
+        snap: CareerSnapshot,
+        now_ts: int,
+    ):
+        """Commit one poll result atomically.
+
+        Buckets, observations, the active session and the career snapshot are
+        one logical update.  Keeping them in one SQLite transaction prevents a
+        process restart from replaying or losing a delta on the next poll.
+        """
+        all_h = deltas.get("all-heroes", HeroCounters())
+        payload = {k: asdict(v) for k, v in snap.heroes.items()}
+        with self._conn() as conn:
+            for hk, b in bucket_updates.items():
+                conn.execute(
+                    """
+                    INSERT INTO observation_buckets
+                    (user_id, gamemode, hero_key, time_sec, deaths, eliminations, damage, healing)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, gamemode, hero_key) DO UPDATE SET
+                        time_sec=excluded.time_sec, deaths=excluded.deaths,
+                        eliminations=excluded.eliminations, damage=excluded.damage,
+                        healing=excluded.healing
+                    """,
+                    (user_id, gamemode, hk, b.time_sec, b.deaths, b.eliminations, b.damage, b.healing),
+                )
+
+            for hk, obs in closed_observations:
+                conn.execute(
+                    """
+                    INSERT INTO observations
+                    (user_id, gamemode, hero_key, output_10m, deaths_10m, eliminations_10m, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (user_id, gamemode, hk, obs.output_10m, obs.deaths_10m, obs.eliminations_10m, obs.created_at),
+                )
+
+            conn.execute(
+                """
+                INSERT INTO active_sessions
+                (user_id, gamemode, started_at, last_change_at, games_played, games_won, games_lost)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, gamemode) DO UPDATE SET
+                    last_change_at=excluded.last_change_at,
+                    games_played=active_sessions.games_played + excluded.games_played,
+                    games_won=active_sessions.games_won + excluded.games_won,
+                    games_lost=active_sessions.games_lost + excluded.games_lost
+                """,
+                (user_id, gamemode, now_ts, now_ts, all_h.games_played, all_h.games_won, all_h.games_lost),
+            )
+
+            for hk, cnt in deltas.items():
+                if hk == "all-heroes" or (cnt.time_played <= 0 and cnt.games_played <= 0):
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO session_heroes
+                    (user_id, gamemode, hero_key, time_sec, deaths, eliminations, damage, healing,
+                     games_played, games_won, games_lost)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(user_id, gamemode, hero_key) DO UPDATE SET
+                        time_sec=session_heroes.time_sec + excluded.time_sec,
+                        deaths=session_heroes.deaths + excluded.deaths,
+                        eliminations=session_heroes.eliminations + excluded.eliminations,
+                        damage=session_heroes.damage + excluded.damage,
+                        healing=session_heroes.healing + excluded.healing,
+                        games_played=session_heroes.games_played + excluded.games_played,
+                        games_won=session_heroes.games_won + excluded.games_won,
+                        games_lost=session_heroes.games_lost + excluded.games_lost
+                    """,
+                    (
+                        user_id,
+                        gamemode,
+                        hk,
+                        cnt.time_played,
+                        cnt.deaths,
+                        cnt.eliminations,
+                        cnt.hero_damage_done,
+                        cnt.healing_done,
+                        cnt.games_played,
+                        cnt.games_won,
+                        cnt.games_lost,
+                    ),
+                )
+
+            conn.execute(
+                """
+                INSERT INTO career_snapshots (user_id, gamemode, snapshot_json, taken_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(user_id, gamemode) DO UPDATE SET
+                    snapshot_json=excluded.snapshot_json, taken_at=excluded.taken_at
+                """,
+                (user_id, gamemode, json.dumps(payload), snap.taken_at),
+            )
+
     def get_snapshot(self, user_id: int, gamemode: str) -> Optional[CareerSnapshot]:
         with self._conn() as conn:
             row = conn.execute(
@@ -415,20 +561,23 @@ class Database:
                 (user_id, gamemode, now_ts, now_ts, all_h.games_played, all_h.games_won, all_h.games_lost),
             )
             for hk, cnt in deltas.items():
-                if hk == "all-heroes" or cnt.time_played <= 0:
+                if hk == "all-heroes" or (cnt.time_played <= 0 and cnt.games_played <= 0):
                     continue
                 conn.execute(
                     """
-                    INSERT INTO session_heroes (user_id, gamemode, hero_key, time_sec, deaths, eliminations, damage, healing)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO session_heroes (user_id, gamemode, hero_key, time_sec, deaths, eliminations, damage, healing, games_played, games_won, games_lost)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT(user_id, gamemode, hero_key) DO UPDATE SET
                         time_sec=session_heroes.time_sec + excluded.time_sec,
                         deaths=session_heroes.deaths + excluded.deaths,
                         eliminations=session_heroes.eliminations + excluded.eliminations,
                         damage=session_heroes.damage + excluded.damage,
-                        healing=session_heroes.healing + excluded.healing
+                        healing=session_heroes.healing + excluded.healing,
+                        games_played=session_heroes.games_played + excluded.games_played,
+                        games_won=session_heroes.games_won + excluded.games_won,
+                        games_lost=session_heroes.games_lost + excluded.games_lost
                     """,
-                    (user_id, gamemode, hk, cnt.time_played, cnt.deaths, cnt.eliminations, cnt.hero_damage_done, cnt.healing_done),
+                    (user_id, gamemode, hk, cnt.time_played, cnt.deaths, cnt.eliminations, cnt.hero_damage_done, cnt.healing_done, cnt.games_played, cnt.games_won, cnt.games_lost),
                 )
 
     def get_active_session(self, user_id: int, gamemode: str) -> Optional[Tuple[ dict, Dict[str, HeroCounters] ]]:
@@ -444,7 +593,8 @@ class Database:
                 return None
             h_rows = conn.execute(
                 """
-                SELECT hero_key, time_sec, deaths, eliminations, damage, healing
+                SELECT hero_key, time_sec, deaths, eliminations, damage, healing,
+                       COALESCE(games_played, 0), COALESCE(games_won, 0), COALESCE(games_lost, 0)
                 FROM session_heroes WHERE user_id = ? AND gamemode = ?
                 """,
                 (user_id, gamemode),
@@ -465,6 +615,9 @@ class Database:
                 eliminations=r[3],
                 hero_damage_done=r[4],
                 healing_done=r[5],
+                games_played=r[6] if len(r) > 6 else 0,
+                games_won=r[7] if len(r) > 7 else 0,
+                games_lost=r[8] if len(r) > 8 else 0,
             )
             for r in h_rows
         }
@@ -524,38 +677,64 @@ class Database:
             )
             sess_id = cur.lastrowid
             for hk, cnt in heroes.items():
-                if cnt.time_played <= 0:
+                if cnt.time_played <= 0 and cnt.games_played <= 0:
                     continue
                 conn.execute(
                     """
                     INSERT INTO session_history_heroes
-                    (session_id, hero_key, time_sec, eliminations, deaths, damage, healing)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (session_id, hero_key, time_sec, eliminations, deaths, damage, healing, games_played, games_won, games_lost)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (sess_id, hk, cnt.time_played, cnt.eliminations, cnt.deaths, cnt.hero_damage_done, cnt.healing_done),
+                    (sess_id, hk, cnt.time_played, cnt.eliminations, cnt.deaths, cnt.hero_damage_done, cnt.healing_done, cnt.games_played, cnt.games_won, cnt.games_lost),
                 )
 
-        self.clear_active_session(user_id, gamemode)
+            # Keep archiving and removal in one transaction.  If the process
+            # stops after the INSERT but before a second transaction deletes
+            # the active rows, the next poll would archive the same session a
+            # second time and duplicate the weekly totals.
+            conn.execute(
+                "DELETE FROM active_sessions WHERE user_id = ? AND gamemode = ?",
+                (user_id, gamemode),
+            )
+            conn.execute(
+                "DELETE FROM session_heroes WHERE user_id = ? AND gamemode = ?",
+                (user_id, gamemode),
+            )
         return sess_id
 
     def get_history_sessions_since(
-        self, user_id: int, since_ts: int, gamemode: Optional[str] = None
+        self,
+        user_id: int,
+        since_ts: int,
+        gamemode: Optional[str] = None,
+        until_ts: Optional[int] = None,
     ) -> List[Tuple[dict, Dict[str, HeroCounters]]]:
         """
         Возвращает список завершенных сессий из истории начиная с since_ts.
         Каждый элемент: (meta_dict, heroes_dict).
         """
         with self._conn() as conn:
+            # Sessions are attributed to the calendar week in which they
+            # started.  An upper bound is essential for reports generated on
+            # Monday: without it, Monday's sessions leak into the previous
+            # week's report.
+            if until_ts is None:
+                time_clause = "started_at >= ?"
+                time_params = (since_ts,)
+            else:
+                time_clause = "started_at >= ? AND started_at <= ?"
+                time_params = (since_ts, until_ts)
+
             if gamemode:
                 rows = conn.execute(
                     """
                     SELECT id, gamemode, started_at, ended_at, duration_sec, games_played, games_won, games_lost,
                            eliminations, deaths, damage, healing
                     FROM session_history
-                    WHERE user_id = ? AND gamemode = ? AND ended_at >= ?
+                    WHERE user_id = ? AND gamemode = ? AND """ + time_clause + """
                     ORDER BY ended_at ASC
                     """,
-                    (user_id, gamemode, since_ts),
+                    (user_id, gamemode, *time_params),
                 ).fetchall()
             else:
                 rows = conn.execute(
@@ -563,10 +742,10 @@ class Database:
                     SELECT id, gamemode, started_at, ended_at, duration_sec, games_played, games_won, games_lost,
                            eliminations, deaths, damage, healing
                     FROM session_history
-                    WHERE user_id = ? AND ended_at >= ?
+                    WHERE user_id = ? AND """ + time_clause + """
                     ORDER BY ended_at ASC
                     """,
-                    (user_id, since_ts),
+                    (user_id, *time_params),
                 ).fetchall()
 
             result = []
@@ -588,7 +767,8 @@ class Database:
                 }
                 h_rows = conn.execute(
                     """
-                    SELECT hero_key, time_sec, eliminations, deaths, damage, healing
+                    SELECT hero_key, time_sec, eliminations, deaths, damage, healing,
+                           COALESCE(games_played, 0), COALESCE(games_won, 0), COALESCE(games_lost, 0)
                     FROM session_history_heroes
                     WHERE session_id = ?
                     """,
@@ -601,6 +781,9 @@ class Database:
                         deaths=hr[3],
                         hero_damage_done=hr[4],
                         healing_done=hr[5],
+                        games_played=hr[6] if len(hr) > 6 else 0,
+                        games_won=hr[7] if len(hr) > 7 else 0,
+                        games_lost=hr[8] if len(hr) > 8 else 0,
                     )
                     for hr in h_rows
                 }

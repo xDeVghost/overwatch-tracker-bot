@@ -25,6 +25,14 @@ def test_i18n_hero_names():
     assert get_hero_name("ana", lang=LANG_EN) == "Ana"
     assert get_hero_name("wrecking-ball", lang=LANG_RU) == "Таран"
     assert get_hero_name("wrecking-ball", lang=LANG_EN) == "Wrecking Ball"
+    assert get_hero_name("emre", lang=LANG_RU) == "Эмре"
+    assert get_hero_name("emre", lang=LANG_EN) == "Emre"
+    assert get_hero_name("sierra", lang=LANG_RU) == "Сьерра"
+    assert get_hero_name("sierra", lang=LANG_EN) == "Sierra"
+    assert get_hero_name("jetpack-cat", lang=LANG_RU) == "Реактивная Киса"
+    assert get_hero_name("jetpack-cat", lang=LANG_EN) == "Jetpack Cat"
+    assert get_hero_name("domina", lang=LANG_RU) == "Домина"
+    assert get_hero_name("wuyang", lang=LANG_RU) == "Уян"
 
 
 def test_i18n_duration_formatting():

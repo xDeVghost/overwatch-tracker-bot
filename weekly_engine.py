@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 import time
 from typing import Dict, List, Optional, Tuple
 
+import config
 from db import Database
 from i18n import (
     DAY_FULL_NAMES,
@@ -25,7 +26,11 @@ def get_current_week_bounds(now_dt: Optional[datetime] = None, lang: str = "ru")
     Календарная неделя: с понедельника 00:00:00 по воскресенье 23:59:59.
     """
     if now_dt is None:
-        now_dt = datetime.now()
+        now_dt = datetime.now(config.APP_TIMEZONE)
+    elif now_dt.tzinfo is None:
+        now_dt = now_dt.replace(tzinfo=config.APP_TIMEZONE)
+    else:
+        now_dt = now_dt.astimezone(config.APP_TIMEZONE)
 
     # weekday(): Понедельник = 0, Воскресенье = 6
     start_dt = (now_dt - timedelta(days=now_dt.weekday())).replace(
@@ -55,20 +60,25 @@ def aggregate_weekly_report(
     """
     Агрегирует данные за текущую календарную неделю для указанного пользователя и режима.
     """
-    now_dt = datetime.fromtimestamp(now_ts) if now_ts else datetime.now()
+    now_dt = datetime.fromtimestamp(now_ts, tz=config.APP_TIMEZONE) if now_ts else datetime.now(config.APP_TIMEZONE)
     start_dt, end_dt, period_title = get_current_week_bounds(now_dt, lang=lang)
     start_ts = int(start_dt.timestamp())
     end_ts = int(end_dt.timestamp())
 
     # 1. Получаем историю сессий за эту неделю
-    history_sessions = db.get_history_sessions_since(user_id, since_ts=start_ts, gamemode=gamemode)
+    history_sessions = db.get_history_sessions_since(
+        user_id,
+        since_ts=start_ts,
+        until_ts=end_ts,
+        gamemode=gamemode,
+    )
 
     # 2. Добавляем активную сессию, если она идет прямо сейчас
     active = db.get_active_session(user_id, gamemode)
     all_sessions: List[Tuple[dict, Dict[str, HeroCounters]]] = list(history_sessions)
     if active:
         act_meta, act_heroes = active
-        if act_meta["started_at"] >= start_ts:
+        if start_ts <= act_meta["started_at"] <= end_ts:
             all_sessions.append((
                 {
                     "id": -1,
@@ -145,7 +155,7 @@ def aggregate_weekly_report(
             longest_session_time = s_dur
 
         # Относим к дню недели по started_at (начало игровой сессии)
-        s_dt = datetime.fromtimestamp(s_meta["started_at"])
+        s_dt = datetime.fromtimestamp(s_meta["started_at"], tz=config.APP_TIMEZONE)
         w_idx = s_dt.weekday()
         if 0 <= w_idx < 7:
             day_obj = days_data[w_idx]
@@ -180,13 +190,15 @@ def aggregate_weekly_report(
     best_day_score = -1.0
     for i, d in enumerate(days_data):
         decided = d.games_won + d.games_lost
-        if decided > 0:
+        if decided > 0 and d.games_won > 0:
             d.winrate_pct = round((d.games_won / decided) * 100)
             # Оценка полезности дня: винрейт + вес побед
             day_score = d.winrate_pct * 10.0 + d.games_won * 2.0
             if day_score > best_day_score:
                 best_day_score = day_score
                 best_day_idx = i
+        elif decided > 0:
+            d.winrate_pct = 0
 
     best_day_title = "—"
     if best_day_idx >= 0 and days_data[best_day_idx].games_played > 0:
@@ -220,8 +232,11 @@ def aggregate_weekly_report(
                 healing_10m=round(h_cnt.healing_done * factor, 0),
             )
         )
-        if idx == 0 and h_time >= 600:
-            hero_of_the_week_title = f"{h_name} · {h_cnt.games_won}-{h_cnt.games_lost}"
+        if idx == 0 and h_time >= 60:
+            if (h_cnt.games_won + h_cnt.games_lost) > 0:
+                hero_of_the_week_title = f"{h_name} · {h_cnt.games_won}-{h_cnt.games_lost}"
+            else:
+                hero_of_the_week_title = f"{h_name} · {format_time_duration(h_time, lang)}"
 
     # Общие средние за 10 минут
     f_all = (600.0 / tot_time_sec) if tot_time_sec > 0 else 0.0

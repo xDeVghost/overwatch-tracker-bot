@@ -48,7 +48,11 @@ def extract_competitive_ranks(
         r_info = p_ranks.get(r_key)
         if r_info and isinstance(r_info, dict):
             div = str(r_info.get("division") or "unranked").lower()
-            tier = int(r_info.get("tier") or 1)
+            try:
+                tier = int(r_info.get("tier") or 1)
+            except (TypeError, ValueError):
+                tier = 1
+            tier = max(1, min(5, tier))
             div_title = div_map.get(div, div.capitalize())
             delta_str = None
             if session_won > 0 or session_lost > 0:
@@ -404,6 +408,7 @@ def evaluate_hero_session(
     session_counters: HeroCounters,
     observations: List[ObservationRecord],
     career_counters: Optional[HeroCounters],
+    alt_career_counters: Optional[HeroCounters] = None,
     bucket_time_sec: float = 0.0,
     obs_sec: int = config.OBS_SEC,
     min_obs: int = config.MIN_OBS,
@@ -417,7 +422,8 @@ def evaluate_hero_session(
     role_title = r_titles.get(role, role.upper())
     time_sec = session_counters.time_played
     time_min = max(1, int(round(time_sec / 60.0)))
-    metric_type = select_output_metric_type(role, career_counters, session_counters.healing_done)
+    active_ref = career_counters or alt_career_counters
+    metric_type = select_output_metric_type(role, active_ref, session_counters.healing_done)
 
     # Показатели сессии в пересчёте на 10 минут
     factor_10m = 600.0 / max(1.0, time_sec)
@@ -434,20 +440,43 @@ def evaluate_hero_session(
         out_history = [o.output_10m for o in recent_obs]
         deaths_history = [o.deaths_10m for o in recent_obs]
         elim_history = [o.eliminations_10m for o in recent_obs if o.eliminations_10m > 0]
-    elif career_counters and career_counters.time_played >= 60:
-        # Если наблюдений мало, используем личную среднюю норму из карьеры Blizzard
-        c_f10 = 600.0 / career_counters.time_played
-        c_out = (career_counters.healing_done if metric_type == "healing" else career_counters.hero_damage_done) * c_f10
-        c_deaths = career_counters.deaths * c_f10
-        c_elim = career_counters.eliminations * c_f10
-        # Коридор обычной игры: +/- 12% от среднего по карьере
-        out_history = [c_out * 0.88, c_out, c_out * 1.12]
-        deaths_history = [c_deaths * 0.88, c_deaths, c_deaths * 1.12]
-        elim_history = [c_elim * 0.88, c_elim, c_elim * 1.12]
     else:
-        out_history = []
-        deaths_history = []
-        elim_history = []
+        # Рассчитываем базовую норму карьеры, строго ИСКЛЮЧАЯ текущую сессию,
+        # чтобы не сравнивать сессию саму с собой и не выдавать ложные 0% «как обычно»
+        base_cnt = None
+        if career_counters:
+            prior_time = career_counters.time_played - session_counters.time_played
+            if prior_time >= 600:
+                prior_dmg = max(0.0, career_counters.hero_damage_done - session_counters.hero_damage_done)
+                prior_heal = max(0.0, career_counters.healing_done - session_counters.healing_done)
+                prior_deaths = max(0.0, career_counters.deaths - session_counters.deaths)
+                prior_elim = max(0.0, career_counters.eliminations - session_counters.eliminations)
+                base_cnt = HeroCounters(
+                    time_played=prior_time,
+                    deaths=prior_deaths,
+                    eliminations=prior_elim,
+                    hero_damage_done=prior_dmg,
+                    healing_done=prior_heal,
+                )
+
+        # Если в текущем режиме истории мало (например, первые калибровочные игры в comp),
+        # берем базовую историю из альтернативного режима (quickplay)
+        if not base_cnt and alt_career_counters and alt_career_counters.time_played >= 600:
+            base_cnt = alt_career_counters
+
+        if base_cnt and base_cnt.time_played >= 600:
+            c_f10 = 600.0 / base_cnt.time_played
+            c_out = (base_cnt.healing_done if metric_type == "healing" else base_cnt.hero_damage_done) * c_f10
+            c_deaths = base_cnt.deaths * c_f10
+            c_elim = base_cnt.eliminations * c_f10
+            # Коридор обычной игры: +/- 12% от среднего по карьере
+            out_history = [c_out * 0.88, c_out, c_out * 1.12]
+            deaths_history = [c_deaths * 0.88, c_deaths, c_deaths * 1.12]
+            elim_history = [c_elim * 0.88, c_elim, c_elim * 1.12]
+        else:
+            out_history = []
+            deaths_history = []
+            elim_history = []
 
     out_scale = build_metric_scale(metric_type, sess_out_10m, out_history, lang=lang)
     deaths_scale = build_metric_scale("deaths", sess_deaths_10m, deaths_history, lang=lang)

@@ -174,6 +174,8 @@ async def poll_single_user(session: aiohttp.ClientSession, user_row: Tuple[int, 
         any_change = True
 
         # 1. Накапливаем наблюдения в вёдрах (независимо от сессий)
+        bucket_updates = {}
+        closed_observations = []
         for hk, h_delta in deltas.items():
             if hk == "all-heroes" or h_delta.time_played <= 0:
                 continue
@@ -181,18 +183,26 @@ async def poll_single_user(session: aiohttp.ClientSession, user_row: Tuple[int, 
             m_type = select_output_metric_type(role, curr_snap.heroes.get(hk), h_delta.healing_done)
             bucket = db.get_bucket(user_id, mode, hk)
             new_bucket, closed_obs = update_bucket_with_delta(bucket, h_delta, m_type, config.OBS_SEC, now_ts)
-            db.save_bucket(user_id, mode, hk, new_bucket)
+            bucket_updates[hk] = new_bucket
             if closed_obs:
-                db.insert_observation(user_id, mode, hk, closed_obs)
+                closed_observations.append((hk, closed_obs))
                 logger.info(
                     f"OBS_CLOSED: user={user_id} mode={mode} hero={hk} "
                     f"out10m={closed_obs.output_10m} d10m={closed_obs.deaths_10m} elim10m={closed_obs.eliminations_10m} rem_sec={new_bucket.time_sec:.1f}"
                 )
 
-        # 2. Добавляем дельту в сессию (проверка тайм-аута и авто-отправка — только в polling_worker)
-        # Всегда добавляем свежие матчи в активную сессию
-        db.add_session_delta(user_id, mode, deltas, now_ts)
-        db.save_snapshot(user_id, mode, curr_snap)
+        # 2. Ведра, наблюдения, активная сессия и новый snapshot должны
+        # фиксироваться вместе: так одна и та же дельта не задвоится и не
+        # потеряется при перезапуске между отдельными SQL-транзакциями.
+        db.record_poll_update(
+            user_id,
+            mode,
+            deltas,
+            bucket_updates,
+            closed_observations,
+            curr_snap,
+            now_ts,
+        )
 
     logger.info(
         f"SUMMARY_GATE_CHECK: user={user_id} btag={btag} summary_changed={summary_changed} career_changed={any_change}"
@@ -227,6 +237,8 @@ def build_session_card_for_mode(
     roles_map, names_map = db.get_heroes_maps(lang=lang)
     prefs = db.get_preferences(user_id)
     curr_snap = db.get_snapshot(user_id, mode)
+    alt_mode = "quickplay" if mode == "competitive" else "competitive"
+    alt_snap = db.get_snapshot(user_id, alt_mode)
 
     max_hero_blocks = 3 if mode == "competitive" else 4
     chosen_roles, other_heroes = select_role_heroes_and_footer(
@@ -239,6 +251,7 @@ def build_session_card_for_mode(
         obs_list = db.get_observations(user_id, mode, hk, config.OBS_WINDOW)
         bucket = db.get_bucket(user_id, mode, hk)
         career_cnt = curr_snap.heroes.get(hk) if curr_snap else None
+        alt_cnt = alt_snap.heroes.get(hk) if alt_snap else None
         h_name = names_map.get(hk, hk.capitalize())
 
         block = evaluate_hero_session(
@@ -249,6 +262,7 @@ def build_session_card_for_mode(
             session_counters=h_cnt,
             observations=obs_list,
             career_counters=career_cnt,
+            alt_career_counters=alt_cnt,
             bucket_time_sec=bucket.time_sec,
             obs_sec=config.OBS_SEC,
             min_obs=config.MIN_OBS,
@@ -270,10 +284,20 @@ def build_session_card_for_mode(
 
     kd_status = "usual"
     kd_diff_pct = None
-    if curr_snap:
-        c_el = sum(h.eliminations for hk, h in curr_snap.heroes.items() if hk != "all-heroes")
-        c_de = sum(h.deaths for hk, h in curr_snap.heroes.items() if hk != "all-heroes")
-        if c_de > 0:
+    c_snap_for_kd = curr_snap
+    c_de = sum(h.deaths for hk, h in c_snap_for_kd.heroes.items() if hk != "all-heroes") if c_snap_for_kd else 0
+    if c_de < 10 and alt_snap:
+        alt_de = sum(h.deaths for hk, h in alt_snap.heroes.items() if hk != "all-heroes")
+        if alt_de >= 10:
+            c_snap_for_kd = alt_snap
+
+    if c_snap_for_kd:
+        c_el = sum(h.eliminations for hk, h in c_snap_for_kd.heroes.items() if hk != "all-heroes")
+        c_de = sum(h.deaths for hk, h in c_snap_for_kd.heroes.items() if hk != "all-heroes")
+        if c_snap_for_kd is curr_snap:
+            c_el = max(0.0, c_el - tot_elim)
+            c_de = max(0.0, c_de - tot_deaths)
+        if c_de >= 5:
             c_kd = c_el / float(c_de)
             if c_kd > 0.05:
                 kd_diff_pct = round(((sess_kd - c_kd) / c_kd) * 100)
@@ -299,15 +323,20 @@ def build_session_card_for_mode(
         if isinstance(ranks_json_data, dict):
             for plat_data in ranks_json_data.values():
                 if isinstance(plat_data, dict) and "season" in plat_data:
-                    season_number = int(plat_data["season"])
-                    break
+                    try:
+                        season_number = int(plat_data["season"])
+                    except (TypeError, ValueError):
+                        season_number = None
+                    if season_number is not None:
+                        break
 
+    actual_games = max(meta["games_played"], meta["games_won"] + meta["games_lost"])
     card_data = SessionCardData(
         player_name=player_name,
         gamemode=mode,
         mode_title=mode_title,
         duration_min=max(1, int(round(total_sec / 60.0))),
-        games_played=meta["games_played"],
+        games_played=actual_games,
         games_won=meta["games_won"],
         games_lost=meta["games_lost"],
         role_blocks=role_blocks,
@@ -549,10 +578,11 @@ async def cmd_close_manual(message: Message):
 
 
 @dp.message(Command("sync"))
+@dp.message(Command("card"))
 async def cmd_sync(message: Message):
     """
-    Принудительно синхронизирует и отправляет карточку соревновательного режима
-    на основе текущих сыгранных матчей профиля, если они ещё не были отправлены.
+    Принудительно опрашивает серверы Blizzard на наличие новых сыгранных матчей
+    и отправляет карточки активных сессий, если накопились сыгранные игры.
     """
     user = db.get_user(message.chat.id)
     user_lang = db.get_user_language(message.chat.id)
@@ -562,49 +592,56 @@ async def cmd_sync(message: Message):
 
     user_id = user[0]
     btag = user[1]
-    wait_text = "🔄 Синхронизирую сыгранные матчи..." if user_lang == "ru" else "🔄 Syncing played matches..."
+    wait_text = "🔄 Опрашиваю серверы Blizzard на наличие сыгранных матчей..." if user_lang == "ru" else "🔄 Checking Blizzard servers for recent matches..."
     wait_msg = await message.answer(wait_text)
 
     async with aiohttp.ClientSession() as session:
-        curr_snap, _ = await provider.fetch_career(session, btag, "competitive")
-        if not curr_snap:
-            err_txt = "❌ Не удалось получить соревновательную статистику." if user_lang == "ru" else "❌ Failed to fetch competitive stats."
-            await wait_msg.edit_text(err_txt)
-            return
-
-        all_h = curr_snap.heroes.get("all-heroes")
-        if not all_h or all_h.games_played <= 0:
-            no_txt = "ℹ️ В соревновательном режиме пока нет сыгранных игр." if user_lang == "ru" else "ℹ️ No competitive games found yet."
-            await wait_msg.edit_text(no_txt)
-            return
-
-        now_ts = int(time.time())
-        db.add_session_delta(user_id, "competitive", curr_snap.heroes, now_ts)
         try:
-            card, total_sec = build_session_card_for_mode(user_id, btag, "competitive", lang=user_lang)
-            if card:
+            await poll_single_user(session, user)
+        except Exception as poll_err:
+            logger.error(f"SYNC_POLL_ERROR: {poll_err}", exc_info=True)
+
+    sent_any = False
+    now_ts = int(time.time())
+
+    for mode in ("competitive", "quickplay"):
+        try:
+            card, total_sec = build_session_card_for_mode(user_id, btag, mode, lang=user_lang)
+            if card is not None:
                 png_bytes = render_session_card(card)
-                photo = BufferedInputFile(png_bytes, filename="ow_competitive_sync.png")
+                photo = BufferedInputFile(png_bytes, filename=f"ow_{mode}_sync.png")
                 await message.answer_photo(
                     photo=photo,
                     caption=format_card_caption(card, lang=user_lang),
                     parse_mode="HTML",
                     reply_markup=main_reply_kb(user_lang),
                 )
-                db.archive_active_session(user_id, "competitive", now_ts)
-                await wait_msg.delete()
-                return
+                db.archive_active_session(user_id, mode, now_ts)
+                sent_any = True
         except Exception as e:
-            logger.error(f"SYNC_ERROR: {e}", exc_info=True)
-            await wait_msg.edit_text(f"❌ Ошибка генерации: {e}")
+            logger.error(f"SYNC_CARD_ERROR: mode={mode} {e}", exc_info=True)
+
+    try:
+        await wait_msg.delete()
+    except Exception:
+        pass
+
+    if not sent_any:
+        no_matches_txt = (
+            "ℹ️ <b>Нет активных или новых сыгранных матчей для карточки.</b>\n"
+            "Если ты только что доиграл матч, статистика Blizzard может обновляться с задержкой (до 5–10 минут)."
+            if user_lang == "ru"
+            else "ℹ️ <b>No active or uncarded matches found.</b>\nBlizzard stats may update with a slight delay (5–10 minutes)."
+        )
+        await message.answer(no_matches_txt, parse_mode="HTML", reply_markup=main_reply_kb(user_lang))
 
 
 async def send_weekly_report_to_user(
     user_id: int, btag: str, avatar_url: str, user_lang: str, target_dt: datetime
-) -> int:
+) -> Tuple[int, bool]:
     """
     Генерирует и отправляет карточки еженедельного отчёта за неделю, содержащую target_dt.
-    Возвращает количество отправленных карточек (0, 1 или 2).
+    Возвращает (количество отправленных карточек, были_ли_ошибки).
     """
     avatar_path = os.path.join(assets.AVATARS_CACHE_DIR, f"{btag}.png")
     if not os.path.isfile(avatar_path) and avatar_url:
@@ -616,6 +653,7 @@ async def send_weekly_report_to_user(
 
     target_ts = int(target_dt.timestamp())
     sent_count = 0
+    had_failure = False
     for mode in ("quickplay", "competitive"):
         try:
             weekly_data = aggregate_weekly_report(user_id, mode, db, now_ts=target_ts, lang=user_lang)
@@ -651,9 +689,10 @@ async def send_weekly_report_to_user(
                     f"WEEKLY_REPORT_SENT: user={user_id} btag={btag} mode={mode} matches={weekly_data.total_matches}"
                 )
         except Exception as e:
+            had_failure = True
             logger.error(f"WEEKLY_REPORT_ERROR: user={user_id} mode={mode} err={e}", exc_info=True)
 
-    return sent_count
+    return sent_count, had_failure
 
 
 async def check_auto_weekly_reports():
@@ -664,7 +703,7 @@ async def check_auto_weekly_reports():
     - В понедельник за только что окончившуюся прошедшую неделю.
     Пометка в БД гарантирует, что каждому пользователю отчёт за неделю отправляется строго 1 раз.
     """
-    now_dt = datetime.now()
+    now_dt = datetime.now(config.APP_TIMEZONE)
     if now_dt.weekday() == 6 and now_dt.hour >= 20:
         target_dt = now_dt
     elif now_dt.weekday() == 0:
@@ -685,13 +724,20 @@ async def check_auto_weekly_reports():
         if last_sent == week_key:
             continue
 
+        sent_count = 0
+        had_failure = False
         try:
-            sent_count = await send_weekly_report_to_user(user_id, btag, avatar_url, user_lang, target_dt)
-            if sent_count > 0:
+            sent_count, had_failure = await send_weekly_report_to_user(
+                user_id, btag, avatar_url, user_lang, target_dt
+            )
+            if sent_count > 0 and not had_failure:
                 logger.info(f"AUTO_WEEKLY_SUCCESS: user={user_id} btag={btag} week={week_key} sent={sent_count}")
         except Exception as e:
             logger.error(f"AUTO_WEEKLY_FAIL: user={user_id} err={e}", exc_info=True)
-        finally:
+        # Mark the week only after at least one report was delivered.  A
+        # transient API/render/Telegram failure (or an empty week) must not
+        # permanently suppress the next retry.
+        if sent_count > 0 and not had_failure:
             db.set_user_last_weekly(user_id, week_key)
 
 
@@ -709,7 +755,9 @@ async def cmd_weekly(message: Message):
     btag = user[1]
     avatar_url = user[4] if len(user) > 4 else ""
 
-    sent_count = await send_weekly_report_to_user(user_id, btag, avatar_url, user_lang, datetime.now())
+    sent_count, _ = await send_weekly_report_to_user(
+        user_id, btag, avatar_url, user_lang, datetime.now(config.APP_TIMEZONE)
+    )
     try:
         await status_msg.delete()
     except Exception:
@@ -757,6 +805,7 @@ async def polling_worker():
                                 continue
 
                             # Сессия протухла — собираем и пытаемся отправить карточку
+                            card_build_failed = False
                             try:
                                 card, total_sec = build_session_card_for_mode(user_id, btag, mode, lang=user_lang)
                             except Exception as card_err:
@@ -765,8 +814,14 @@ async def polling_worker():
                                     exc_info=True,
                                 )
                                 card, total_sec = None, 0.0
+                                card_build_failed = True
 
-                            if card is not None and meta.get("games_played", 0) > meta.get("last_viewed_games", 0):
+                            has_new_activity = (
+                                meta.get("games_played", 0) > meta.get("last_viewed_games", 0)
+                                or (meta.get("last_viewed_games", 0) == 0 and total_sec >= config.MIN_SESSION_SEC)
+                            )
+                            should_archive = False
+                            if card is not None and has_new_activity:
                                 try:
                                     png_bytes = render_session_card(card)
                                     photo = BufferedInputFile(png_bytes, filename=f"ow_{mode}.png")
@@ -780,30 +835,38 @@ async def polling_worker():
                                     logger.info(
                                         f"AUTO_SESSION_SENT: user={user_id} btag={btag} mode={mode} games={meta.get('games_played')}"
                                     )
+                                    should_archive = True
                                 except Exception as send_err:
                                     logger.error(f"AUTO_SEND_FAIL: user={user_id} mode={mode} err={send_err}")
-                            elif card is None:
+                            elif card is None and not card_build_failed:
                                 logger.info(
                                     f"SESSION_DROPPED_SHORT: user={user_id} mode={mode} total_sec={total_sec:.1f}"
+                                )
+                                should_archive = True
+                            elif card_build_failed:
+                                logger.info(
+                                    f"SESSION_RETAINED_BUILD_ERROR: user={user_id} mode={mode}"
                                 )
                             else:
                                 logger.info(
                                     f"AUTO_SESSION_ARCHIVED_SILENT: user={user_id} mode={mode} games={meta.get('games_played')} already viewed"
                                 )
+                                should_archive = True
 
-                            # Архивируем в любом случае (даже если был краш сборки карточки)
-                            db.archive_active_session(user_id, mode, now_ts)
+                            # Keep failed sends active so the next polling
+                            # cycle can retry instead of silently losing the
+                            # whole session.
+                            if should_archive:
+                                db.archive_active_session(user_id, mode, now_ts)
 
                         except Exception as mode_err:
                             logger.error(
                                 f"MODE_TIMEOUT_ERROR: user={user_id} btag={btag} mode={mode} err={mode_err}",
                                 exc_info=True,
                             )
-                            # Принудительно архивируем чтобы зависшая сессия не блокировала следующие циклы
-                            try:
-                                db.archive_active_session(user_id, mode, now_ts)
-                            except Exception:
-                                pass
+                            # Preserve the active session after unexpected
+                            # errors; it is safer to retry than to discard
+                            # data that has not been delivered.
 
         except Exception as e:
             logger.error(f"WORKER_ERROR: {e}", exc_info=True)

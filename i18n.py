@@ -21,7 +21,9 @@ HERO_RU_MAP = {
     "sombra": "Сомбра", "symmetra": "Симметра", "torbjorn": "Торбьорн",
     "tracer": "Трейсер", "venture": "Авантюра", "widowmaker": "Роковая Вдова",
     "winston": "Уинстон", "wrecking-ball": "Таран", "zarya": "Заря",
-    "zenyatta": "Дзенъятта", "anran": "Анран",
+    "zenyatta": "Дзенъятта", "anran": "Анран", "emre": "Эмре",
+    "domina": "Домина", "doctrine": "Доктрина", "d-mon": "Д.Мон", "d_mon": "Д.Мон",
+    "mizuki": "Мидзуки", "shion": "Сион", "wuyang": "Уян",
 }
 
 HERO_EN_MAP = {
@@ -39,7 +41,9 @@ HERO_EN_MAP = {
     "sombra": "Sombra", "symmetra": "Symmetra", "torbjorn": "Torbjörn",
     "tracer": "Tracer", "venture": "Venture", "widowmaker": "Widowmaker",
     "winston": "Winston", "wrecking-ball": "Wrecking Ball", "zarya": "Zarya",
-    "zenyatta": "Zenyatta", "anran": "Anran",
+    "zenyatta": "Zenyatta", "anran": "Anran", "emre": "Emre",
+    "domina": "Domina", "doctrine": "Doctrine", "d-mon": "D.Mon", "d_mon": "D.Mon",
+    "mizuki": "Mizuki", "shion": "Shion", "wuyang": "Wuyang",
 }
 
 ROLE_ORDER = ["tank", "damage", "support"]
