@@ -548,6 +548,57 @@ async def cmd_close_manual(message: Message):
         await message.answer(t("cmd_close_empty", user_lang), reply_markup=main_reply_kb(user_lang))
 
 
+@dp.message(Command("sync"))
+async def cmd_sync(message: Message):
+    """
+    Принудительно синхронизирует и отправляет карточку соревновательного режима
+    на основе текущих сыгранных матчей профиля, если они ещё не были отправлены.
+    """
+    user = db.get_user(message.chat.id)
+    user_lang = db.get_user_language(message.chat.id)
+    if not user:
+        await message.answer(t("need_register", user_lang), parse_mode="HTML")
+        return
+
+    user_id = user[0]
+    btag = user[1]
+    wait_text = "🔄 Синхронизирую сыгранные матчи..." if user_lang == "ru" else "🔄 Syncing played matches..."
+    wait_msg = await message.answer(wait_text)
+
+    async with aiohttp.ClientSession() as session:
+        curr_snap, _ = await provider.fetch_career(session, btag, "competitive")
+        if not curr_snap:
+            err_txt = "❌ Не удалось получить соревновательную статистику." if user_lang == "ru" else "❌ Failed to fetch competitive stats."
+            await wait_msg.edit_text(err_txt)
+            return
+
+        all_h = curr_snap.heroes.get("all-heroes")
+        if not all_h or all_h.games_played <= 0:
+            no_txt = "ℹ️ В соревновательном режиме пока нет сыгранных игр." if user_lang == "ru" else "ℹ️ No competitive games found yet."
+            await wait_msg.edit_text(no_txt)
+            return
+
+        now_ts = int(time.time())
+        db.add_session_delta(user_id, "competitive", curr_snap.heroes, now_ts)
+        try:
+            card, total_sec = build_session_card_for_mode(user_id, btag, "competitive", lang=user_lang)
+            if card:
+                png_bytes = render_session_card(card)
+                photo = BufferedInputFile(png_bytes, filename="ow_competitive_sync.png")
+                await message.answer_photo(
+                    photo=photo,
+                    caption=format_card_caption(card, lang=user_lang),
+                    parse_mode="HTML",
+                    reply_markup=main_reply_kb(user_lang),
+                )
+                db.archive_active_session(user_id, "competitive", now_ts)
+                await wait_msg.delete()
+                return
+        except Exception as e:
+            logger.error(f"SYNC_ERROR: {e}", exc_info=True)
+            await wait_msg.edit_text(f"❌ Ошибка генерации: {e}")
+
+
 async def send_weekly_report_to_user(
     user_id: int, btag: str, avatar_url: str, user_lang: str, target_dt: datetime
 ) -> int:

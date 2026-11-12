@@ -104,8 +104,20 @@ def snapshots_equal(prev: CareerSnapshot, curr: CareerSnapshot) -> bool:
 def compute_delta(prev: CareerSnapshot, curr: CareerSnapshot) -> Tuple[Optional[Dict[str, HeroCounters]], bool]:
     """
     Возвращает (deltas_by_hero, is_negative_reset).
-    Если любой счётчик любого героя уменьшился — возвращает (None, True).
+    Глобальный сброс фиксируется только при реальном обнулении статистики (например, новый сезон).
+    Мелкие рассинхроны и погрешности округления Blizzard по отдельным героям не сбрасывают сессию.
     """
+    prev_all = prev.heroes.get("all-heroes", HeroCounters())
+    curr_all = curr.heroes.get("all-heroes", HeroCounters())
+
+    # Глобальный сброс: сыгранные матчи уменьшились, либо общее время существенно упало (> 60 сек)
+    if curr_all.games_played < prev_all.games_played or (curr_all.time_played - prev_all.time_played) < -60.0:
+        logger.warning(
+            f"GLOBAL_CAREER_RESET: games {prev_all.games_played} -> {curr_all.games_played}, "
+            f"time {prev_all.time_played:.1f} -> {curr_all.time_played:.1f}"
+        )
+        return None, True
+
     deltas: Dict[str, HeroCounters] = {}
     all_keys = set(prev.heroes.keys()) | set(curr.heroes.keys())
 
@@ -122,20 +134,29 @@ def compute_delta(prev: CareerSnapshot, curr: CareerSnapshot) -> Tuple[Optional[
         dgw = ch.games_won - ph.games_won
         dgl = ch.games_lost - ph.games_lost
 
-        if dt < -1e-3 or dd < -1e-3 or delim < -1e-3 or ddmg < -1e-3 or dheal < -1e-3 or dgp < 0 or dgw < 0 or dgl < 0:
-            logger.warning(f"NEGATIVE_DELTA_RESET: hero={k} dt={dt} dd={dd} delim={delim} ddmg={ddmg} dheal={dheal} dgp={dgp}")
-            return None, True
+        # Если отдельный герой имеет небольшую отрицательную погрешность от Blizzard — логируем и сглаживаем в 0
+        if dt < 0 or dd < 0 or delim < 0 or ddmg < 0 or dheal < 0 or dgp < 0 or dgw < 0 or dgl < 0:
+            logger.info(f"MINOR_BLIZZARD_JITTER: hero={k} dt={dt:.1f} dd={dd:.0f} delim={delim:.0f}")
 
-        if dt > 0 or dgp > 0 or dd > 0 or delim > 0 or ddmg > 0 or dheal > 0:
+        clean_dt = max(0.0, dt)
+        clean_dd = max(0.0, dd)
+        clean_delim = max(0.0, delim)
+        clean_ddmg = max(0.0, ddmg)
+        clean_dheal = max(0.0, dheal)
+        clean_dgp = max(0, dgp)
+        clean_dgw = max(0, dgw)
+        clean_dgl = max(0, dgl)
+
+        if clean_dt > 0 or clean_dgp > 0 or clean_dd > 0 or clean_delim > 0 or clean_ddmg > 0 or clean_dheal > 0:
             deltas[k] = HeroCounters(
-                time_played=max(0.0, dt),
-                deaths=max(0.0, dd),
-                eliminations=max(0.0, delim),
-                hero_damage_done=max(0.0, ddmg),
-                healing_done=max(0.0, dheal),
-                games_played=max(0, dgp),
-                games_won=max(0, dgw),
-                games_lost=max(0, dgl),
+                time_played=clean_dt,
+                deaths=clean_dd,
+                eliminations=clean_delim,
+                hero_damage_done=clean_ddmg,
+                healing_done=clean_dheal,
+                games_played=clean_dgp,
+                games_won=clean_dgw,
+                games_lost=clean_dgl,
             )
 
     return deltas, False

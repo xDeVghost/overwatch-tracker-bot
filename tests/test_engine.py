@@ -43,11 +43,38 @@ def test_missing_keys_default_to_zero_and_delta():
 
 
 def test_negative_delta_triggers_reset():
-    s1 = CareerSnapshot(taken_at=100, heroes={"sojourn": HeroCounters(time_played=1000, deaths=10)})
-    s2 = CareerSnapshot(taken_at=200, heroes={"sojourn": HeroCounters(time_played=950, deaths=10)})
+    # Глобальный сброс статистики (например, новый сезон / обнуление матчей)
+    s1 = CareerSnapshot(taken_at=100, heroes={"all-heroes": HeroCounters(time_played=5000, games_played=10)})
+    s2 = CareerSnapshot(taken_at=200, heroes={"all-heroes": HeroCounters(time_played=200, games_played=1)})
     deltas, is_reset = compute_delta(s1, s2)
     assert is_reset is True
     assert deltas is None
+
+
+def test_minor_jitter_does_not_reset_session():
+    # Микро-погрешность Blizzard на отдельном герое (-6 сек на Сомбре) не должна сбрасывать сессию
+    s1 = CareerSnapshot(
+        taken_at=100,
+        heroes={
+            "all-heroes": HeroCounters(time_played=2000, games_played=2),
+            "sojourn": HeroCounters(time_played=1000, hero_damage_done=8000),
+            "sombra": HeroCounters(time_played=500),
+        },
+    )
+    s2 = CareerSnapshot(
+        taken_at=200,
+        heroes={
+            "all-heroes": HeroCounters(time_played=2600, games_played=3),
+            "sojourn": HeroCounters(time_played=1600, hero_damage_done=13000),
+            "sombra": HeroCounters(time_played=494),  # -6 секунд джиттер округления Blizzard
+        },
+    )
+    deltas, is_reset = compute_delta(s1, s2)
+    assert is_reset is False
+    assert deltas is not None
+    assert deltas["sojourn"].time_played == 600.0
+    assert deltas["sojourn"].hero_damage_done == 5000.0
+    assert deltas.get("sombra") is None or deltas["sombra"].time_played == 0.0
 
 
 def test_bucket_closes_max_one_observation_per_delta_and_carries_remainder():
