@@ -214,8 +214,16 @@ def _compute_norm_and_band(values: List[float]) -> Tuple[float, float, float]:
     Возвращает (норма, нижняя_граница_обычного, верхняя_граница_обычного)
     по последним наблюдениям (центральное значение и средние 50%).
     """
+    if not values:
+        return 0.0, 0.0, 0.0
+
     s = sorted(values)
     n = len(s)
+
+    if n == 1:
+        # Одно значение — норма = оно, коридор ±12%
+        v = s[0]
+        return v, v * 0.88, v * 1.12
 
     def _point_at(q: float) -> float:
         pos = q * (n - 1)

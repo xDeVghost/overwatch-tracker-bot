@@ -64,8 +64,6 @@ dp = Dispatcher()
 db = Database(config.DB_PATH)
 provider = OverFastProvider(config.OVERFAST_BASE_URL)
 
-BTN_CLOSE_NOW_RU = t("btn_card_now", "ru")
-BTN_CLOSE_NOW_EN = t("btn_card_now", "en")
 BTN_WEEKLY_RU = t("btn_weekly", "ru")
 BTN_WEEKLY_EN = t("btn_weekly", "en")
 BTN_SETTINGS_RU = t("btn_settings", "ru")
@@ -73,10 +71,10 @@ BTN_SETTINGS_EN = t("btn_settings", "en")
 
 
 def main_reply_kb(lang: str = "ru") -> ReplyKeyboardMarkup:
+    """Клавиатура с двумя кнопками: Недельный отчёт и Настройки."""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=t("btn_card_now", lang)), KeyboardButton(text=t("btn_weekly", lang))],
-            [KeyboardButton(text=t("btn_settings", lang))],
+            [KeyboardButton(text=t("btn_weekly", lang)), KeyboardButton(text=t("btn_settings", lang))],
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -513,63 +511,8 @@ async def cb_set_hero(call: CallbackQuery):
     )
 
 
-@dp.message(F.text.in_([BTN_CLOSE_NOW_RU, BTN_CLOSE_NOW_EN]))
-async def cmd_card_now(message: Message):
-    user = db.get_user(message.chat.id)
-    user_lang = db.get_user_language(message.chat.id)
-    if not user:
-        await message.answer(t("need_register", user_lang), parse_mode="HTML")
-        return
 
-    status_msg = await message.answer(t("fetching_data", user_lang))
-    async with aiohttp.ClientSession() as session:
-        any_new, cache_age = await poll_single_user(session, user)
-
-    user_id = user[0]
-    btag = user[1]
-    sent_any = False
-    short_sessions: List[Tuple[str, int]] = []
-
-    for mode in ("quickplay", "competitive"):
-        card, total_sec = build_session_card_for_mode(user_id, btag, mode, lang=user_lang)
-        if card is not None:
-            png_bytes = render_session_card(card)
-            # Отмечаем сессию просмотренной, но НЕ закрываем и НЕ удаляем её
-            db.mark_session_viewed(user_id, mode, card.games_played)
-            warn = None
-            if not any_new or cache_age > 120:
-                warn = t("blizzard_delay", user_lang)
-            photo = BufferedInputFile(png_bytes, filename=f"ow_{mode}.png")
-            await message.answer_photo(
-                photo=photo,
-                caption=format_card_caption(card, warning_note=warn, lang=user_lang),
-                parse_mode="HTML",
-                reply_markup=main_reply_kb(user_lang),
-            )
-            sent_any = True
-        elif total_sec > 0:
-            m_title = MODE_TITLES.get(user_lang, MODE_TITLES["ru"]).get(mode, mode)
-            short_sessions.append((m_title, int(total_sec // 60)))
-
-    await status_msg.delete()
-
-    if not sent_any:
-        if short_sessions:
-            details = ", ".join(t("session_min_short", user_lang, mode=m, mins=mins) for m, mins in short_sessions)
-            await message.answer(
-                t("too_short_session", user_lang, details=details),
-                parse_mode="HTML",
-                reply_markup=main_reply_kb(user_lang),
-            )
-        else:
-            await message.answer(
-                t("no_active_session", user_lang),
-                parse_mode="HTML",
-                reply_markup=main_reply_kb(user_lang),
-            )
-
-
-@dp.message(Command("close"))
+@dp.message(Command(\"close\"))
 async def cmd_close_manual(message: Message):
     user = db.get_user(message.chat.id)
     user_lang = db.get_user_language(message.chat.id)
@@ -662,43 +605,70 @@ async def polling_worker():
                     user_lang = user_row[5] if len(user_row) > 5 else db.get_user_language(user_id)
                     try:
                         await poll_single_user(session, user_row)
+                    except Exception as poll_err:
+                        logger.error(f"POLL_ERROR: user={user_id} btag={btag} err={poll_err}", exc_info=True)
+                        continue
 
-                        for mode in ("quickplay", "competitive"):
+                    for mode in ("quickplay", "competitive"):
+                        try:
                             active = db.get_active_session(user_id, mode)
                             if not active:
                                 continue
                             meta, _ = active
-                            if (now_ts - meta["last_change_at"]) >= config.SESSION_TIMEOUT_SEC:
+                            if (now_ts - meta["last_change_at"]) < config.SESSION_TIMEOUT_SEC:
+                                continue
+
+                            # Сессия протухла — собираем и пытаемся отправить карточку
+                            try:
                                 card, total_sec = build_session_card_for_mode(user_id, btag, mode, lang=user_lang)
-                                if card is not None and meta.get("games_played", 0) > meta.get("last_viewed_games", 0):
+                            except Exception as card_err:
+                                logger.error(
+                                    f"CARD_BUILD_ERROR: user={user_id} mode={mode} err={card_err}",
+                                    exc_info=True,
+                                )
+                                card, total_sec = None, 0.0
+
+                            if card is not None and meta.get("games_played", 0) > meta.get("last_viewed_games", 0):
+                                try:
                                     png_bytes = render_session_card(card)
                                     photo = BufferedInputFile(png_bytes, filename=f"ow_{mode}.png")
-                                    try:
-                                        await bot.send_photo(
-                                            chat_id=user_id,
-                                            photo=photo,
-                                            caption=format_card_caption(card, lang=user_lang),
-                                            parse_mode="HTML",
-                                            reply_markup=main_reply_kb(user_lang),
-                                        )
-                                        logger.info(
-                                            f"AUTO_SESSION_SENT: user={user_id} btag={btag} mode={mode} games={meta.get('games_played')}"
-                                        )
-                                    except Exception as send_err:
-                                        logger.error(f"AUTO_SEND_FAIL: user={user_id} mode={mode} err={send_err}")
-                                elif card is None:
-                                    logger.info(
-                                        f"SESSION_DROPPED_SHORT: user={user_id} mode={mode} total_sec={total_sec:.1f} < {config.MIN_SESSION_SEC}"
+                                    await bot.send_photo(
+                                        chat_id=user_id,
+                                        photo=photo,
+                                        caption=format_card_caption(card, lang=user_lang),
+                                        parse_mode="HTML",
+                                        reply_markup=main_reply_kb(user_lang),
                                     )
-                                else:
                                     logger.info(
-                                        f"AUTO_SESSION_ARCHIVED_SILENT: user={user_id} mode={mode} games={meta.get('games_played')} already viewed"
+                                        f"AUTO_SESSION_SENT: user={user_id} btag={btag} mode={mode} games={meta.get('games_played')}"
                                     )
+                                except Exception as send_err:
+                                    logger.error(f"AUTO_SEND_FAIL: user={user_id} mode={mode} err={send_err}")
+                            elif card is None:
+                                logger.info(
+                                    f"SESSION_DROPPED_SHORT: user={user_id} mode={mode} total_sec={total_sec:.1f}"
+                                )
+                            else:
+                                logger.info(
+                                    f"AUTO_SESSION_ARCHIVED_SILENT: user={user_id} mode={mode} games={meta.get('games_played')} already viewed"
+                                )
+
+                            # Архивируем в любом случае (даже если был краш сборки карточки)
+                            db.archive_active_session(user_id, mode, now_ts)
+
+                        except Exception as mode_err:
+                            logger.error(
+                                f"MODE_TIMEOUT_ERROR: user={user_id} btag={btag} mode={mode} err={mode_err}",
+                                exc_info=True,
+                            )
+                            # Принудительно архивируем чтобы зависшая сессия не блокировала следующие циклы
+                            try:
                                 db.archive_active_session(user_id, mode, now_ts)
-                    except Exception as u_err:
-                        logger.error(f"USER_POLL_ERROR: user={user_id} btag={btag} err={u_err}")
+                            except Exception:
+                                pass
+
         except Exception as e:
-            logger.error(f"WORKER_ERROR: {e}")
+            logger.error(f"WORKER_ERROR: {e}", exc_info=True)
 
 
 async def main():

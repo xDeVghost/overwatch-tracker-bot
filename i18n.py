@@ -122,9 +122,9 @@ TEXTS: Dict[str, Dict[str, str]] = {
             "Привет! Отправь свой BattleTag в формате <code>Name#12345</code> "
             "(или <code>/start Name#12345</code>), чтобы я начал отслеживать сессии.\n\n"
             "Доступные функции:\n"
-            "• <b>📊 Карточка сейчас</b> — сформировать карточку текущей сессии\n"
             "• <b>📅 Недельный отчёт</b> — инфографика и гистограмма за неделю\n"
-            "• <b>⚙️ Настройки</b> — выбор основных героев по ролям и языковые настройки"
+            "• <b>⚙️ Настройки</b> — выбор основных героев по ролям и языковые настройки\n\n"
+            "Карточки сессий отправляются <b>автоматически</b> после завершения игры."
         ),
 
         # Profile registration
@@ -242,9 +242,9 @@ TEXTS: Dict[str, Dict[str, str]] = {
             "Hello! Send your BattleTag in <code>Name#12345</code> format "
             "(or <code>/start Name#12345</code>) to start tracking your sessions.\n\n"
             "Features:\n"
-            "• <b>📊 Card Now</b> — generate card for current session\n"
             "• <b>📅 Weekly Report</b> — weekly infographics and charts\n"
-            "• <b>⚙️ Settings</b> — select main heroes and switch language"
+            "• <b>⚙️ Settings</b> — select main heroes and switch language\n\n"
+            "Session cards are sent <b>automatically</b> after you finish playing."
         ),
 
         # Profile registration

@@ -7,6 +7,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import config
 from db import Database
 from engine import (
+    _compute_norm_and_band,
     build_metric_scale,
     combine_two_verdicts,
     compute_delta,
@@ -250,6 +251,20 @@ def test_session_storage_and_timeout_cleanup():
         pass
 
 
+def test_compute_norm_and_band_empty_and_single():
+    """_compute_norm_and_band must not crash on empty or single-element lists."""
+    # Empty list → all zeros
+    norm, lo, hi = _compute_norm_and_band([])
+    assert norm == 0.0 and lo == 0.0 and hi == 0.0
+
+    # Single value → norm = value, band ±12%
+    v = 5000.0
+    norm2, lo2, hi2 = _compute_norm_and_band([v])
+    assert norm2 == v
+    assert abs(lo2 - v * 0.88) < 1.0
+    assert abs(hi2 - v * 1.12) < 1.0
+
+
 def test_competitive_ranks_parsing_and_db_storage():
     import json
     from engine import extract_competitive_ranks
@@ -289,3 +304,17 @@ def test_competitive_ranks_parsing_and_db_storage():
         os.remove(tmp_db)
     except PermissionError:
         pass
+
+
+def test_compute_norm_and_band_empty_and_single():
+    """_compute_norm_and_band must not crash on empty or single-element lists."""
+    # Empty list → all zeros
+    norm, lo, hi = _compute_norm_and_band([])
+    assert norm == 0.0 and lo == 0.0 and hi == 0.0
+
+    # Single value → norm = value, band ±12%
+    v = 5000.0
+    norm2, lo2, hi2 = _compute_norm_and_band([v])
+    assert norm2 == v
+    assert abs(lo2 - v * 0.88) < 1.0
+    assert abs(hi2 - v * 1.12) < 1.0
