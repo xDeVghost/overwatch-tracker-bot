@@ -359,18 +359,26 @@ def make_settings_kb(chat_id: int, lang: str) -> InlineKeyboardMarkup:
 # ==================== TELEGRAM HANDLERS ====================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
+    user = db.get_user(message.chat.id)
     user_lang = db.get_user_language(message.chat.id)
-    if not db.get_user(message.chat.id):
+    if not user:
         tg_lang = (message.from_user.language_code or "ru").lower()[:2]
         user_lang = "en" if tg_lang == "en" else "ru"
 
     parts = message.text.strip().split(maxsplit=1)
     if len(parts) < 2:
-        await message.answer(
-            t("start_greeting", user_lang),
-            parse_mode="HTML",
-            reply_markup=main_reply_kb(user_lang),
-        )
+        if user:
+            await message.answer(
+                t("start_already_registered", user_lang, btag=user[1]),
+                parse_mode="HTML",
+                reply_markup=main_reply_kb(user_lang),
+            )
+        else:
+            await message.answer(
+                t("start_greeting", user_lang),
+                parse_mode="HTML",
+                reply_markup=main_reply_kb(user_lang),
+            )
         return
     await register_battletag(message, parts[1].strip(), user_lang=user_lang)
 

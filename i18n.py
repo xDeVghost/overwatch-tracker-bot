@@ -126,6 +126,15 @@ TEXTS: Dict[str, Dict[str, str]] = {
             "• <b>⚙️ Настройки</b> — выбор основных героев по ролям и языковые настройки\n\n"
             "Карточки сессий отправляются <b>автоматически</b> после завершения игры."
         ),
+        "start_already_registered": (
+            "👋 <b>С возвращением!</b>\n"
+            "Я уже отслеживаю профиль <b>{btag}</b>.\n\n"
+            "Карточки сессий отправляются <b>автоматически</b> после окончания игры.\n\n"
+            "Доступные функции:\n"
+            "• <b>📅 Недельный отчёт</b> — инфографика и гистограмма за неделю\n"
+            "• <b>⚙️ Настройки</b> — выбор основных героев по ролям и смена языка\n\n"
+            "<i>Чтобы привязать другой аккаунт, отправь: <code>/start Name#12345</code></i>"
+        ),
 
         # Profile registration
         "checking_profile": "⏳ Проверяю профиль <b>{btag}</b>...",
@@ -245,6 +254,15 @@ TEXTS: Dict[str, Dict[str, str]] = {
             "• <b>📅 Weekly Report</b> — weekly infographics and charts\n"
             "• <b>⚙️ Settings</b> — select main heroes and switch language\n\n"
             "Session cards are sent <b>automatically</b> after you finish playing."
+        ),
+        "start_already_registered": (
+            "👋 <b>Welcome back!</b>\n"
+            "Currently tracking profile <b>{btag}</b>.\n\n"
+            "Session cards are sent <b>automatically</b> after you finish playing.\n\n"
+            "Features:\n"
+            "• <b>📅 Weekly Report</b> — weekly infographics and charts\n"
+            "• <b>⚙️ Settings</b> — select main heroes and change language\n\n"
+            "<i>To link another account, send: <code>/start Name#12345</code></i>"
         ),
 
         # Profile registration
